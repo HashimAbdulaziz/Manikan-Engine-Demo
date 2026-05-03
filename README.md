@@ -13,9 +13,8 @@ Built as a full-stack web application with a React + Three.js frontend and a Fas
 <!-- Replace the line below with your demo video or GIF -->
 <!-- Example: ![Manikan Demo](./docs/assets/demo.mp4) -->
 
-> **Demo video coming soon.** Drop your recording into `docs/assets/` and uncomment the embed above.
 
-[View the demo video](./docs/assets/)
+[View the demo video](./docs/demo.mp4)
 
 ---
 
