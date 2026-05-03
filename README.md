@@ -17,7 +17,7 @@ Built as a full-stack web application with a React + Three.js frontend and a Fas
 
 
 <div align="center">
-  <video src="./docs/demo.mp4" width="100%" controls muted autoplay loop>
+  <video src="https://github.com/HashimAbdulaziz/Manikan-Engine-Demo/raw/main/docs/demo.mp4" width="100%" controls muted autoplay loop>
   </video>
 </div>
 
