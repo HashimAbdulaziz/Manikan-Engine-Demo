@@ -22,6 +22,7 @@ References:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -32,6 +33,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import trimesh
+import trimesh.smoothing
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
@@ -49,6 +51,7 @@ logger = logging.getLogger("manikan")
 # Configuration
 # ---------------------------------------------------------------------------
 MODEL_DIR = Path(__file__).resolve().parent / "models"
+CLOTHING_DIR = MODEL_DIR / "clothing"
 NUM_BETAS: int = 10
 DEVICE = torch.device("cpu")
 
@@ -459,7 +462,121 @@ def _load_smpl_model(gender: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  MESH GENERATION PIPELINE  (v2 — Optimisation-based)
+#  GARMENT TEMPLATE LOADING & β-DRIVEN WARPING
+# ═══════════════════════════════════════════════════════════════════════════
+
+_garment_cache: Dict[str, dict] = {}
+
+
+def _load_garment_template(name: str = "tshirt", gender: str = "neutral") -> dict:
+    """
+    Load a pre-registered garment template and its SMPL vertex index map.
+
+    Tries to load a gender-specific file first (e.g. tshirt_male_template.obj),
+    then falls back to the gender-neutral alias (tshirt_template.obj).
+
+    Returns a dict with keys: 'mesh', 'body_indices', 'base_verts'.
+    """
+    if (name, gender) in _garment_cache:
+        return _garment_cache[(name, gender)]
+
+    # Prefer NPZ (exact vertex arrays), fall back to legacy OBJ
+    candidates = [
+        (CLOTHING_DIR / f"{name}_{gender}_template.npz",
+         CLOTHING_DIR / f"{name}_{gender}_vertex_map.json"),
+        (CLOTHING_DIR / f"{name}_template.npz",
+         CLOTHING_DIR / f"{name}_vertex_map.json"),
+        # Legacy OBJ fallback
+        (CLOTHING_DIR / f"{name}_{gender}_template.obj",
+         CLOTHING_DIR / f"{name}_{gender}_vertex_map.json"),
+        (CLOTHING_DIR / f"{name}_template.obj",
+         CLOTHING_DIR / f"{name}_vertex_map.json"),
+    ]
+
+    mesh_path, map_path = None, None
+    for mp, jp in candidates:
+        if mp.exists() and jp.exists():
+            mesh_path, map_path = mp, jp
+            break
+
+    if mesh_path is None:
+        logger.warning(
+            "Garment template '%s' (gender=%s) not found at %s. "
+            "Run: python tools/generate_tshirt_template.py",
+            name, gender, CLOTHING_DIR,
+        )
+        return None
+
+    # Load mesh — NPZ preserves exact vertex arrays; OBJ may deduplicate
+    if mesh_path.suffix == ".npz":
+        data = np.load(str(mesh_path))
+        garment_mesh = trimesh.Trimesh(
+            vertices=data["vertices"], faces=data["faces"], process=False
+        )
+    else:
+        garment_mesh = trimesh.load(str(mesh_path), process=False, force="mesh")
+
+    with open(map_path, "r") as f:
+        body_indices = json.load(f)
+
+    # Sanity check: vertex count must match vertex map
+    if len(garment_mesh.vertices) != len(body_indices):
+        raise ValueError(
+            f"Garment template mismatch for '{name}' (gender={gender}): "
+            f"mesh has {len(garment_mesh.vertices)} verts but vertex map has "
+            f"{len(body_indices)} entries. "
+            f"Please re-run: python tools/generate_tshirt_template.py"
+        )
+
+    entry = {
+        "mesh": garment_mesh,
+        "body_indices": np.array(body_indices, dtype=np.int64),
+        "base_verts": garment_mesh.vertices.copy(),
+    }
+    _garment_cache[(name, gender)] = entry
+
+    logger.info(
+        "Loaded garment '%s' (gender=%s) from %s: %d verts, %d faces",
+        name, gender, mesh_path.name,
+        len(garment_mesh.vertices), len(garment_mesh.faces),
+    )
+    return entry
+
+
+
+
+
+def apply_garment_deformations(
+        scene: trimesh.Scene, 
+        vertex_maps: dict, 
+        base_body_mesh: trimesh.Trimesh, 
+        garment_name: str, 
+        garment_faces: np.ndarray, 
+        material: trimesh.visual.material.PBRMaterial
+    ):
+    """
+    STRICT 1:1 DYNAMIC VERTEX TRACKING.
+    Garments strictly follow the body deformation in real-time.
+    Garment_Pos[i] = Body_Pos[Nearest_Index] + (Body_Normal[Nearest_Index] * 0.012)
+    This strictly disables floating balloon effects and fixes skin-clipping.
+    """
+    g_name = garment_name.replace("Garment_", "").lower()
+    if g_name in vertex_maps:
+        indices = vertex_maps[g_name]
+        
+        # 1:1 Dynamic Vertex Tracking logic
+        anchored_verts = np.array(base_body_mesh.vertices[indices], dtype=np.float32)
+        normal_push = np.array(base_body_mesh.vertex_normals[indices], dtype=np.float32) * 0.012
+        anchored_verts += normal_push
+        
+        # Build fresh geometry targeting the scene
+        new_mesh = trimesh.Trimesh(vertices=anchored_verts, faces=garment_faces, process=False)
+        new_mesh.visual = trimesh.visual.TextureVisuals(material=material)
+        scene.add_geometry(new_mesh, node_name=garment_name)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MESH GENERATION PIPELINE  (v2 — Optimisation-based, with Garment Layer)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def generate_avatar_mesh(
@@ -507,35 +624,73 @@ def generate_avatar_mesh(
             return_verts=True,
         )
 
-    vertices = output.vertices.detach().cpu().numpy().squeeze()  # (6890, 3)
+    vertices_unscaled = output.vertices.detach().cpu().numpy().squeeze()  # (6890, 3)
     faces = model.faces
     if not isinstance(faces, np.ndarray):
         faces = np.array(faces, dtype=np.int64)
 
-    # ── Step 4: Uniform scale to exact target height ──────────────────
-    mesh_height_m = vertices[:, 1].max() - vertices[:, 1].min()
+    # ── Step 4: Compute scale factor ──────────────────────────────────
+    mesh_height_m = vertices_unscaled[:, 1].max() - vertices_unscaled[:, 1].min()
     target_height_m = height_cm / 100.0
+    scale = target_height_m / mesh_height_m if mesh_height_m > 0 else 1.0
 
-    if mesh_height_m > 0:
-        scale = target_height_m / mesh_height_m
-        vertices *= scale
-        logger.info(
-            "Scaled mesh: %.4f m → %.4f m  (factor %.4f)",
-            mesh_height_m, target_height_m, scale,
+    # ── Step 5: Setup Unscaled Scene ──────────────────────────────────
+    scene = trimesh.Scene()
+    
+    # Body
+    body_mesh = trimesh.Trimesh(vertices=vertices_unscaled * scale, faces=faces, process=False)
+    body_mesh.visual = trimesh.visual.TextureVisuals(
+        material=trimesh.visual.material.PBRMaterial(
+            baseColorFactor=[180, 160, 140, 255],
+            metallicFactor=0.0,
+            roughnessFactor=0.7,
         )
-
-    # ── Step 5: Export to GLB ─────────────────────────────────────────
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-    material = trimesh.visual.material.PBRMaterial(
-        baseColorFactor=[180, 160, 140, 255],
-        metallicFactor=0.0,
-        roughnessFactor=0.7,
     )
-    mesh.visual = trimesh.visual.TextureVisuals(material=material)
+    # Ensure body normals are calculated for accurate 1:1 garment tracking
+    trimesh.repair.fix_normals(body_mesh)
+    scene.add_geometry(body_mesh, node_name="SMPL_Body")
 
-    glb_bytes: bytes = mesh.export(file_type="glb")
-    logger.info("GLB export complete: %d bytes", len(glb_bytes))
+    # (The function `apply_garment_deformations` has been shifted down for correct scoping)
+
+
+    # ── Step 6: Apply 1:1 Dynamic Garment Tracking ────────────────────
+    
+    # Load T-shirt
+    entry_ts = _load_garment_template("tshirt", gender=sex)
+    if entry_ts is not None:
+        garment_faces = entry_ts["mesh"].faces
+        vertex_maps = {"tshirt": entry_ts["body_indices"]}
+        mat = trimesh.visual.material.PBRMaterial(
+            baseColorFactor=[30, 60, 130, 255],   # navy blue
+            metallicFactor=0.0,
+            roughnessFactor=0.92,
+        )
+        apply_garment_deformations(scene, vertex_maps, body_mesh, "Garment_Tshirt", garment_faces, mat)
+
+    # Load Pants
+    entry_pt = _load_garment_template("pants", gender=sex)
+    if entry_pt is not None:
+        garment_faces = entry_pt["mesh"].faces
+        vertex_maps = {"pants": entry_pt["body_indices"]}
+        mat = trimesh.visual.material.PBRMaterial(
+            baseColorFactor=[60, 55, 45, 255],    # dark khaki
+            metallicFactor=0.0,
+            roughnessFactor=0.88,
+        )
+        apply_garment_deformations(scene, vertex_maps, body_mesh, "Garment_Pants", garment_faces, mat)
+
+    # Force explicitly wiping the scene bounding box cache so the GLB is forced to recalculate!
+    scene._cache.clear()
+
+    # ── Step 7: Export ────────────────────────────────────────────────
+    glb_bytes: bytes = scene.export(file_type="glb")
+    logger.info(
+        "GLB export complete (Body + garments): %d bytes",
+        len(glb_bytes),
+    )
+
     return glb_bytes
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════

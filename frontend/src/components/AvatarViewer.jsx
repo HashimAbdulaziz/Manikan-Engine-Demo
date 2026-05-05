@@ -18,20 +18,53 @@ function AvatarModel({ url }) {
     }
   })
 
-  // Apply premium material override to all meshes
+  // Apply distinct materials per mesh node
   const enhancedScene = useMemo(() => {
     const scene = gltf.scene.clone(true)
 
-    const material = new THREE.MeshStandardMaterial({
+    const skinMaterial = new THREE.MeshStandardMaterial({
       color: new THREE.Color('#c8a88e'),
       roughness: 0.55,
       metalness: 0.05,
       envMapIntensity: 0.8,
     })
 
+    const tshirtMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#1e3c82'),    // navy blue
+      roughness: 0.92,
+      metalness: 0.0,
+      envMapIntensity: 0.4,
+    })
+
+    const pantsMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#3c372d'),    // dark khaki / charcoal
+      roughness: 0.88,
+      metalness: 0.0,
+      envMapIntensity: 0.4,
+    })
+
+    const fallbackFabric = new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#4a4a5a'),
+      roughness: 0.90,
+      metalness: 0.0,
+    })
+
     scene.traverse((child) => {
       if (child.isMesh) {
-        child.material = material
+        const name = child.name
+
+        if (name === 'SMPL_Body' || name.toLowerCase().includes('body')) {
+          child.material = skinMaterial
+        } else if (name === 'Garment_Tshirt') {
+          child.material = tshirtMaterial
+        } else if (name === 'Garment_Pants') {
+          child.material = pantsMaterial
+        } else {
+          child.material = fallbackFabric
+        }
+
+        // Smooth normals for better shading on all meshes
+        child.geometry.computeVertexNormals()
         child.castShadow = true
         child.receiveShadow = true
       }
