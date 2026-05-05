@@ -1,5 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 @import "tailwindcss";
+@import "./store.css";
 
 /* ───────────────────────────────────────────────────────────────────────────
    Manikan — Custom Design Tokens & Global Styles
@@ -43,13 +44,10 @@ body {
   font-family: var(--font-display);
   background-color: var(--color-surface-primary);
   color: var(--color-text-primary);
-  overflow: hidden;
-  height: 100vh;
 }
 
 #root {
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
 }
 
 /* ── Custom Range Slider ─────────────────────────────────────────────────── */

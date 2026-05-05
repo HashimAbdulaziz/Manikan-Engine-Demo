@@ -22,6 +22,7 @@ References:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -597,14 +598,18 @@ async def generate_avatar(payload: MeasurementsPayload):
     10 SMPL shape parameters (β) that best match the provided
     measurements on the mesh surface.
     """
+    loop = asyncio.get_event_loop()
     try:
-        glb_bytes = generate_avatar_mesh(
-            sex=payload.sex.value,
-            height_cm=payload.height_cm,
-            weight_kg=payload.weight_kg,
-            chest_cm=payload.chest_cm,
-            waist_cm=payload.waist_cm,
-            hips_cm=payload.hips_cm,
+        glb_bytes = await loop.run_in_executor(
+            None,
+            lambda: generate_avatar_mesh(
+                sex=payload.sex.value,
+                height_cm=payload.height_cm,
+                weight_kg=payload.weight_kg,
+                chest_cm=payload.chest_cm,
+                waist_cm=payload.waist_cm,
+                hips_cm=payload.hips_cm,
+            ),
         )
     except FileNotFoundError as exc:
         logger.exception("SMPL model file not found")
@@ -616,6 +621,10 @@ async def generate_avatar(payload: MeasurementsPayload):
                 "objects.  See README for instructions."
             ),
         ) from exc
+    except ValueError as exc:
+        if str(exc) == "TOO_SMALL":
+            raise HTTPException(status_code=400, detail="TOO_SMALL") from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Avatar generation failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -625,6 +634,440 @@ async def generate_avatar(payload: MeasurementsPayload):
         media_type="model/gltf-binary",
         headers={
             "Content-Disposition": f'attachment; filename="manikan_{payload.sex.value}.glb"',
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  E-COMMERCE STORE API — Product Catalog + User Profile + Dressed Avatar
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ---------------------------------------------------------------------------
+# Product Catalog  (hardcoded)
+# ---------------------------------------------------------------------------
+PRODUCT_CATALOG = [
+    {
+        "id": "tshirt-001",
+        "name": "Essential Cotton Crew",
+        "description": "Premium 100% organic cotton crew-neck tee. Soft, breathable fabric with a relaxed modern fit. Pre-shrunk and garment-dyed for a lived-in feel from day one.",
+        "price": 29.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-navy.png",
+        "color_name": "Midnight Navy",
+        "color_hex": "#1a1a2e",
+        "sizes": {
+            "S":   {"chest_width_cm": 46, "body_length_cm": 68, "sleeve_length_cm": 19, "shoulder_width_cm": 42},
+            "M":   {"chest_width_cm": 50, "body_length_cm": 70, "sleeve_length_cm": 20, "shoulder_width_cm": 44},
+            "L":   {"chest_width_cm": 54, "body_length_cm": 72, "sleeve_length_cm": 21, "shoulder_width_cm": 46},
+            "XL":  {"chest_width_cm": 58, "body_length_cm": 74, "sleeve_length_cm": 22, "shoulder_width_cm": 48},
+            "XXL": {"chest_width_cm": 62, "body_length_cm": 76, "sleeve_length_cm": 23, "shoulder_width_cm": 50},
+        },
+    },
+    {
+        "id": "tshirt-002",
+        "name": "Heritage Organic Tee",
+        "description": "Clean lines and a timeless silhouette in organic cotton. Ribbed collar, double-stitched hems, and a slightly oversized fit that drapes beautifully.",
+        "price": 34.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-cream.png",
+        "color_name": "Vintage Cream",
+        "color_hex": "#f5f0e1",
+        "sizes": {
+            "S":   {"chest_width_cm": 48, "body_length_cm": 69, "sleeve_length_cm": 20, "shoulder_width_cm": 43},
+            "M":   {"chest_width_cm": 52, "body_length_cm": 71, "sleeve_length_cm": 21, "shoulder_width_cm": 45},
+            "L":   {"chest_width_cm": 56, "body_length_cm": 73, "sleeve_length_cm": 22, "shoulder_width_cm": 47},
+            "XL":  {"chest_width_cm": 60, "body_length_cm": 75, "sleeve_length_cm": 23, "shoulder_width_cm": 49},
+            "XXL": {"chest_width_cm": 64, "body_length_cm": 77, "sleeve_length_cm": 24, "shoulder_width_cm": 51},
+        },
+    },
+    {
+        "id": "tshirt-003",
+        "name": "Explorer Rugged Tee",
+        "description": "Built for adventure. Heavy-weight cotton with reinforced shoulders. Perfect for layering or wearing solo on the trail.",
+        "price": 32.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-green.png",
+        "color_name": "Forest Olive",
+        "color_hex": "#3d4a2e",
+        "sizes": {
+            "S":   {"chest_width_cm": 47, "body_length_cm": 68, "sleeve_length_cm": 19, "shoulder_width_cm": 43},
+            "M":   {"chest_width_cm": 51, "body_length_cm": 70, "sleeve_length_cm": 20, "shoulder_width_cm": 45},
+            "L":   {"chest_width_cm": 55, "body_length_cm": 72, "sleeve_length_cm": 21, "shoulder_width_cm": 47},
+            "XL":  {"chest_width_cm": 59, "body_length_cm": 74, "sleeve_length_cm": 22, "shoulder_width_cm": 49},
+            "XXL": {"chest_width_cm": 63, "body_length_cm": 76, "sleeve_length_cm": 23, "shoulder_width_cm": 51},
+        },
+    },
+    {
+        "id": "tshirt-004",
+        "name": "Urban Stealth Tee",
+        "description": "The essential black tee, elevated. Made from ultra-soft ringspun cotton with a contemporary slim fit. Goes with everything.",
+        "price": 27.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-black.png",
+        "color_name": "Jet Black",
+        "color_hex": "#1a1a1a",
+        "sizes": {
+            "S":   {"chest_width_cm": 45, "body_length_cm": 67, "sleeve_length_cm": 18, "shoulder_width_cm": 41},
+            "M":   {"chest_width_cm": 49, "body_length_cm": 69, "sleeve_length_cm": 19, "shoulder_width_cm": 43},
+            "L":   {"chest_width_cm": 53, "body_length_cm": 71, "sleeve_length_cm": 20, "shoulder_width_cm": 45},
+            "XL":  {"chest_width_cm": 57, "body_length_cm": 73, "sleeve_length_cm": 21, "shoulder_width_cm": 47},
+            "XXL": {"chest_width_cm": 61, "body_length_cm": 75, "sleeve_length_cm": 22, "shoulder_width_cm": 49},
+        },
+    },
+    {
+        "id": "tshirt-005",
+        "name": "Artisan Dyed Crew",
+        "description": "Rich garment-dyed burgundy on heavyweight cotton. Each piece develops a unique patina over time. Boxy relaxed fit.",
+        "price": 36.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-burgundy.png",
+        "color_name": "Deep Burgundy",
+        "color_hex": "#5c1a2a",
+        "sizes": {
+            "S":   {"chest_width_cm": 48, "body_length_cm": 69, "sleeve_length_cm": 20, "shoulder_width_cm": 44},
+            "M":   {"chest_width_cm": 52, "body_length_cm": 71, "sleeve_length_cm": 21, "shoulder_width_cm": 46},
+            "L":   {"chest_width_cm": 56, "body_length_cm": 73, "sleeve_length_cm": 22, "shoulder_width_cm": 48},
+            "XL":  {"chest_width_cm": 60, "body_length_cm": 75, "sleeve_length_cm": 23, "shoulder_width_cm": 50},
+            "XXL": {"chest_width_cm": 64, "body_length_cm": 77, "sleeve_length_cm": 24, "shoulder_width_cm": 52},
+        },
+    },
+    {
+        "id": "tshirt-006",
+        "name": "Metro Blend Tee",
+        "description": "Cotton-polyester blend for all-day comfort. Moisture-wicking, wrinkle-resistant, and perfect for commute-to-weekend transitions.",
+        "price": 31.99,
+        "currency": "USD",
+        "category": "T-Shirts",
+        "image": "/products/tshirt-gray.png",
+        "color_name": "Heather Charcoal",
+        "color_hex": "#4a4a4a",
+        "sizes": {
+            "S":   {"chest_width_cm": 46, "body_length_cm": 68, "sleeve_length_cm": 19, "shoulder_width_cm": 42},
+            "M":   {"chest_width_cm": 50, "body_length_cm": 70, "sleeve_length_cm": 20, "shoulder_width_cm": 44},
+            "L":   {"chest_width_cm": 54, "body_length_cm": 72, "sleeve_length_cm": 21, "shoulder_width_cm": 46},
+            "XL":  {"chest_width_cm": 58, "body_length_cm": 74, "sleeve_length_cm": 22, "shoulder_width_cm": 48},
+            "XXL": {"chest_width_cm": 62, "body_length_cm": 76, "sleeve_length_cm": 23, "shoulder_width_cm": 50},
+        },
+    },
+]
+
+_product_index = {p["id"]: p for p in PRODUCT_CATALOG}
+
+
+# ---------------------------------------------------------------------------
+# User Profile  (in-memory, hardcoded default = Hamdy)
+# ---------------------------------------------------------------------------
+class UserProfile(BaseModel):
+    name: str = "Hamdy"
+    sex: Sex = Sex.male
+    height_cm: float = 175
+    weight_kg: float = 75
+    chest_cm: float = 96
+    waist_cm: float = 82
+    hips_cm: float = 96
+    has_avatar: bool = False
+
+
+_user_profile = UserProfile()
+
+
+# ---------------------------------------------------------------------------
+# Dressed Avatar Payload
+# ---------------------------------------------------------------------------
+class DressedAvatarPayload(BaseModel):
+    """Generate a body mesh wearing a t-shirt."""
+    sex: Sex
+    height_cm: float = Field(..., gt=100, lt=250)
+    weight_kg: float = Field(..., gt=30, lt=250)
+    chest_cm: float = Field(..., gt=50, lt=200)
+    waist_cm: float = Field(..., gt=40, lt=200)
+    hips_cm: float = Field(..., gt=50, lt=200)
+    tshirt_color_hex: str = Field(
+        ..., description="Hex colour for the t-shirt, e.g. '#1a1a2e'"
+    )
+    garment_chest_cm: float = Field(...)
+    garment_length_cm: float = Field(...)
+    garment_sleeve_cm: float = Field(...)
+    garment_shoulder_cm: float = Field(...)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SMPL BODY-PART SEGMENTATION  —  T-Shirt Region Identification
+# ═══════════════════════════════════════════════════════════════════════════
+# SMPL has 24 joints that define body parts.  Each vertex is assigned to
+# a body part via the LBS (Linear Blend Skinning) weights.  We use the
+# dominant joint per vertex to classify it.
+#
+# T-shirt covers:
+#   Joint  0 = Pelvis (upper part)
+#   Joint  1 = L_Hip   → exclude (legs)
+#   Joint  2 = R_Hip   → exclude (legs)
+#   Joint  3 = Spine1
+#   Joint  6 = Spine2
+#   Joint  9 = Spine3
+#   Joint 12 = Neck (lower part)
+#   Joint 13 = L_Collar
+#   Joint 14 = R_Collar
+#   Joint 16 = L_Shoulder
+#   Joint 17 = R_Shoulder
+#   Joint 18 = L_Elbow  → include upper arm only (check Y)
+#   Joint 19 = R_Elbow  → include upper arm only (check Y)
+#
+# We'll use a dynamic Y-threshold to cut off below the garment length.
+
+TSHIRT_JOINT_IDS = {0, 3, 6, 9, 13, 14, 16, 17, 18, 19}
+
+
+# ---------------------------------------------------------------------------
+# Dressed Avatar Generation Pipeline
+# ---------------------------------------------------------------------------
+
+def generate_dressed_avatar_mesh(
+    sex: str,
+    height_cm: float,
+    weight_kg: float,
+    chest_cm: float,
+    waist_cm: float,
+    hips_cm: float,
+    tshirt_color_hex: str,
+    garment_chest_cm: float,
+    garment_length_cm: float,
+    garment_sleeve_cm: float,
+    garment_shoulder_cm: float,
+) -> bytes:
+    """
+    Generate a body mesh with a t-shirt applied via per-vertex colouring.
+
+    The t-shirt region gets the specified colour with fabric-like material,
+    while exposed skin retains the natural skin colour.
+    Vertices in the t-shirt region are offset slightly outward along their
+    normals to simulate fabric thickness (~2mm).
+    """
+
+    # Step 1: Load cached SMPL model
+    model, rings = _load_smpl_model(sex)
+
+    # Step 2: Optimise betas (fewer iterations for speed — dressed avatar)
+    logger.info("Generating dressed avatar (tshirt_color=%s)…", tshirt_color_hex)
+    betas = solve_betas(
+        model=model, rings=rings,
+        target_height_cm=height_cm, target_weight_kg=weight_kg,
+        target_chest_cm=chest_cm, target_waist_cm=waist_cm,
+        target_hips_cm=hips_cm,
+        num_iters=40,
+    )
+
+    # Step 3: Final forward pass
+    with torch.no_grad():
+        output = model(
+            betas=betas.to(DEVICE),
+            global_orient=torch.zeros(1, 3, dtype=torch.float32, device=DEVICE),
+            body_pose=torch.zeros(1, 69, dtype=torch.float32, device=DEVICE),
+            return_verts=True,
+        )
+
+    vertices = output.vertices.detach().cpu().numpy().squeeze()  # (6890, 3)
+    faces = model.faces
+    if not isinstance(faces, np.ndarray):
+        faces = np.array(faces, dtype=np.int64)
+
+    # Step 4: Scale to target height
+    mesh_height_m = vertices[:, 1].max() - vertices[:, 1].min()
+    target_height_m = height_cm / 100.0
+    if mesh_height_m > 0:
+        scale = target_height_m / mesh_height_m
+        vertices *= scale
+
+    # Step 5: Compute dynamic t-shirt mask & realistic fit offset
+    weights = model.lbs_weights.detach().cpu().numpy()
+    dominant_joint = np.argmax(weights, axis=1)
+    tshirt_mask = np.isin(dominant_joint, list(TSHIRT_JOINT_IDS))
+
+    # Find the top of the garment (shoulder/collar highest point)
+    shoulder_verts = np.isin(dominant_joint, [13, 14, 16, 17])
+    garment_top_y = np.max(vertices[shoulder_verts, 1])
+
+    # Dynamic Hem: exactly `garment_length_cm` below the shoulder, adjusted by 0.70 for body contour draping
+    hem_y = garment_top_y - (garment_length_cm / 100.0) * 0.70
+    below_hem = vertices[:, 1] < hem_y
+    tshirt_mask = tshirt_mask & ~below_hem
+
+    # Dynamic Sleeves: Robust 3D distance from shoulder joint
+    if np.any(dominant_joint == 16) and np.any(dominant_joint == 17):
+        l_shoulder = vertices[dominant_joint == 16].mean(axis=0)
+        r_shoulder = vertices[dominant_joint == 17].mean(axis=0)
+        
+        l_arm_mask = np.isin(dominant_joint, [16, 18])
+        r_arm_mask = np.isin(dominant_joint, [17, 19])
+        
+        dist_l = np.linalg.norm(vertices - l_shoulder, axis=1)
+        dist_r = np.linalg.norm(vertices - r_shoulder, axis=1)
+        
+        # 0.85 factor accounts for fabric wrapping around the bicep
+        sleeve_m = (garment_sleeve_cm / 100.0) * 0.85
+        arm_too_long = (l_arm_mask & (dist_l > sleeve_m)) | (r_arm_mask & (dist_r > sleeve_m))
+        tshirt_mask = tshirt_mask & ~arm_too_long
+
+    # Physically Realistic Fit Offset
+    temp_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    normals = temp_mesh.vertex_normals
+    
+    horizontal_normals = normals.copy()
+    horizontal_normals[:, 1] = 0
+    norm = np.linalg.norm(horizontal_normals, axis=1, keepdims=True)
+    norm[norm == 0] = 1
+    horizontal_normals = horizontal_normals / norm
+
+    diff_cm = (garment_chest_cm * 2) - chest_cm
+    base_thickness = 0.005 * scale  # 5mm thickness so it looks like a real garment
+
+    if diff_cm < -25:
+        raise ValueError("TOO_SMALL")
+
+    if diff_cm > 0:
+        # Smoothly expand torso based on LBS weights (prevents swollen arms/neck)
+        torso_weights = weights[:, [0, 3, 6, 9]].sum(axis=1)
+        looseness_radius = (diff_cm / (2 * math.pi * 100.0)) * 0.6  # dampened expansion
+        expansion = horizontal_normals * looseness_radius * torso_weights[:, None]
+        vertices[tshirt_mask] += expansion[tshirt_mask]
+
+    # Apply base thickness to all fabric
+    vertices[tshirt_mask] += normals[tshirt_mask] * base_thickness
+
+    # Step 6: Build per-vertex colours
+    # Parse t-shirt colour hex
+    hex_clean = tshirt_color_hex.lstrip('#')
+    tr = int(hex_clean[0:2], 16)
+    tg = int(hex_clean[2:4], 16)
+    tb = int(hex_clean[4:6], 16)
+
+    # Skin colour
+    skin_r, skin_g, skin_b = 200, 168, 142  # warm skin tone
+
+    # Create per-vertex RGBA
+    vertex_colors = np.zeros((len(vertices), 4), dtype=np.uint8)
+    vertex_colors[:, 0] = skin_r
+    vertex_colors[:, 1] = skin_g
+    vertex_colors[:, 2] = skin_b
+    vertex_colors[:, 3] = 255
+
+    # Apply t-shirt colour
+    vertex_colors[tshirt_mask, 0] = tr
+    vertex_colors[tshirt_mask, 1] = tg
+    vertex_colors[tshirt_mask, 2] = tb
+
+    # Apply black pants
+    pants_joints = [0, 1, 2, 4, 5, 7, 8]  # Pelvis + Legs + Ankles (excluding feet 10, 11)
+    pants_mask = np.isin(dominant_joint, pants_joints) & ~tshirt_mask
+    vertices[pants_mask] += normals[pants_mask] * (0.002 * scale)  # 2mm thickness
+    
+    vertex_colors[pants_mask, 0] = 20  # Very dark grey/black
+    vertex_colors[pants_mask, 1] = 20
+    vertex_colors[pants_mask, 2] = 20
+
+    # Step 7: Export to GLB with vertex colours
+    mesh = trimesh.Trimesh(
+        vertices=vertices,
+        faces=faces,
+        vertex_colors=vertex_colors,
+        process=False,
+    )
+
+    glb_bytes: bytes = mesh.export(file_type="glb")
+    logger.info("Dressed GLB export complete: %d bytes", len(glb_bytes))
+    return glb_bytes
+
+
+# ---------------------------------------------------------------------------
+# Store API Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/products", summary="Get all products")
+async def get_products():
+    """Return the full product catalog."""
+    return PRODUCT_CATALOG
+
+
+@app.get("/products/{product_id}", summary="Get product by ID")
+async def get_product(product_id: str):
+    """Return a single product by its ID."""
+    product = _product_index.get(product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail=f"Product '{product_id}' not found")
+    return product
+
+
+@app.get("/user/profile", summary="Get user profile")
+async def get_user_profile():
+    """Return the current (hardcoded) user profile."""
+    return _user_profile.model_dump()
+
+
+@app.post("/user/profile", summary="Update user profile")
+async def update_user_profile(profile: UserProfile):
+    """Update user profile (in-memory only, no DB)."""
+    global _user_profile
+    _user_profile = profile
+    logger.info("User profile updated: %s", profile.model_dump())
+    return {"status": "ok", "profile": profile.model_dump()}
+
+
+@app.post(
+    "/generate-dressed-avatar",
+    summary="Generate a 3D avatar wearing a t-shirt",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"model/gltf-binary": {}},
+            "description": "Binary GLB file with the body mesh wearing a t-shirt.",
+        }
+    },
+)
+async def generate_dressed_avatar(payload: DressedAvatarPayload):
+    """
+    Generate a body mesh with a t-shirt applied via vertex colouring.
+    The t-shirt region is determined by SMPL body-part segmentation.
+    Runs in a thread pool to avoid blocking the async event loop.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        glb_bytes = await loop.run_in_executor(
+            None,
+            lambda: generate_dressed_avatar_mesh(
+                sex=payload.sex.value,
+                height_cm=payload.height_cm,
+                weight_kg=payload.weight_kg,
+                chest_cm=payload.chest_cm,
+                waist_cm=payload.waist_cm,
+                hips_cm=payload.hips_cm,
+                tshirt_color_hex=payload.tshirt_color_hex,
+                garment_chest_cm=payload.garment_chest_cm,
+                garment_length_cm=payload.garment_length_cm,
+                garment_sleeve_cm=payload.garment_sleeve_cm,
+                garment_shoulder_cm=payload.garment_shoulder_cm,
+            ),
+        )
+    except FileNotFoundError as exc:
+        logger.exception("SMPL model file not found")
+        raise HTTPException(status_code=503, detail="SMPL model files not available.") from exc
+    except ValueError as exc:
+        if str(exc) == "TOO_SMALL":
+            raise HTTPException(status_code=400, detail="TOO_SMALL") from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Dressed avatar generation failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return Response(
+        content=glb_bytes,
+        media_type="model/gltf-binary",
+        headers={
+            "Content-Disposition": f'attachment; filename="manikan_dressed_{payload.sex.value}.glb"',
         },
     )
 
